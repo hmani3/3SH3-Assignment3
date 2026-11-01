@@ -1,5 +1,5 @@
 // Compile with Makefile: run `make` (and `make clean` to remove the binary)
-// Compile manually without Makefile: gcc -Wall -pthread -o A3 A3.c
+// Compile manually without Makefile: gcc -Wall -Wextra -pthread -o A3 A3.c
 // Run: ./A3 [num_students] (e.g., ./A3 5, or ./A3 to default to 5 students)
 
 #include <pthread.h>
@@ -21,10 +21,10 @@ int next_teach = 0;
 // mutex for making any changes to available chairs/ta students, used by both students and TA
 pthread_mutex_t update_status;
 
-// 2 semaphores: 
-// 1st is for posting readiness when complete by ta
-// 2nd is for waiting for student to be ready and alert ta
-sem_t ta_ready;
+// semaphores: 
+// help_done: array of semaphores (one per student) so the TA signals completion to the exact student helped
+// student_waiting: counts waiting students and alerts/wakes the TA
+sem_t *help_done;
 sem_t student_waiting;
 
 // we define two void* funcs to define the ta_behaviour and student_behaviour as the two types of existent threads
@@ -54,9 +54,9 @@ void* ta_behaviour(void* ta_id) {
         // 'simulate' helping, i.e., sleep random num of seconds from 1 - 3
         sleep((rand() % 3) + 1);
 
-        // we are done and ready to wait for the next student, signal this
+        // we are done helping this specific student, signal their individual completion semaphore
         printf("[TA] Finished helping Student %d.\n", student_id);
-        sem_post(&ta_ready);
+        sem_post(&help_done[student_id - 1]);
     }
     return NULL;
 }
@@ -92,8 +92,8 @@ void* student_behaviour(void* student_id) {
             // when possible, will alert as next student in line
             sem_post(&student_waiting);
 
-            // done, now once ta is ready again means the student has been dismissed
-            sem_wait(&ta_ready);
+            // wait on this student's own semaphore until the TA finishes their session
+            sem_wait(&help_done[id - 1]);
             printf("[Student %d] received help from the TA and returns to programming.\n", id);
         } else {
             // make sure to unlock if we continued, and notify we tried and failed to sit
@@ -117,6 +117,18 @@ int main(int argc, char* argv[]) {
     // create ta thread, and n student threads
     pthread_t ta_thread;
     pthread_t* student_threads = malloc(sizeof(pthread_t) * num_students);
+    if (student_threads == NULL) {
+        perror("malloc");
+        return 1;
+    }
+
+    // allocate array of completion semaphores (one per student)
+    help_done = malloc(sizeof(*help_done) * num_students);
+    if (help_done == NULL) {
+        perror("malloc");
+        free(student_threads);
+        return 1;
+    }
 
     // initialize mutex and semaphores, throw error if there was a problem
     if (pthread_mutex_init(&update_status, NULL)) {
@@ -127,9 +139,11 @@ int main(int argc, char* argv[]) {
         perror("Semaphore student_waiting init failed");
         return 1;
     }
-    if (sem_init(&ta_ready, 0, 0) != 0) {
-        perror("Semaphore ta_ready init failed");
-        return 1;
+    for (int i = 0; i < num_students; i++) {
+        if (sem_init(&help_done[i], 0, 0) != 0) {
+            perror("Semaphore initialization failed");
+            return 1;
+        }
     }
 
     // create single ta thread, and n student threads
@@ -144,10 +158,13 @@ int main(int argc, char* argv[]) {
         pthread_join(student_threads[i], NULL);
     }
 
-    // destroy mutex and semaphore when we are done
+    // destroy mutex and semaphores when we are done
     pthread_mutex_destroy(&update_status);
     sem_destroy(&student_waiting);
-    sem_destroy(&ta_ready);
+    for (int i = 0; i < num_students; i++) {
+        sem_destroy(&help_done[i]);
+    }
+    free(help_done);
     free(student_threads);
 
     return 0;
